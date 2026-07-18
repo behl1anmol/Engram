@@ -126,3 +126,29 @@ Deviation (architecture amended):
 - Rollup command generates a skeleton (bullets from entries) for the agent to condense
   via `edit` — narrative quality is agent judgment, not CLI mechanics.
 - Tests: 60 passing total. Windows: **pending-windows**.
+
+## M5 — Cross-agent adapters — 2026-07-18
+
+| AC | Result |
+|----|--------|
+| `adapt --target codex` → AGENTS.md block, same store, zero memories copied | PASS (file-count proof + cross-agent visibility test) |
+| `adapt --target copilot` emits instructions with recall-first/distill/no-secrets | PASS |
+| Rerun byte-identical | PASS (block is deterministic — no timestamps) |
+| `--export` self-sufficient for unknown agents | PASS (block + README, degraded-mode floor included) |
+| Consent refusal leaves target untouched, reports skipped | PASS (non-interactive without --yes exits 1, writes nothing) |
+
+Verified locations (fetched 2026-07-18, cited in docs/adapters.md):
+- Codex: `$CODEX_HOME` (default `~/.codex`)/`AGENTS.md` — learn.chatgpt.com docs.
+- opencode: `$XDG_CONFIG_HOME`/opencode/`AGENTS.md` — opencode.ai/docs/rules.
+- Copilot CLI: `~/.copilot` home confirmed (COPILOT_HOME), but a *global* instructions
+  file is NOT explicitly documented — adapter writes `copilot-instructions.md` there and
+  the install report + docs tell the user to verify; repo-level fallback documented.
+
+Decisions:
+- Marker-delimited block (`<!-- ENGRAM:BEGIN/END -->`), upsert preserves surrounding
+  user content; unmatched BEGIN without END is an error, never a guess.
+- Consent: interactive y/N prompt on tty; non-interactive requires explicit `--yes`
+  (rule 11) — refusal/missing consent writes nothing.
+- Export mode works for any target name — the adapter floor (AD-11) needs no
+  per-agent knowledge.
+- Tests: 69 passing total. Windows: **pending-windows**.
