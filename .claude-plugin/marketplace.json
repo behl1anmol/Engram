@@ -1,0 +1,17 @@
+{
+  "name": "engram-marketplace",
+  "owner": {
+    "name": "Anmol Behl",
+    "email": "behl1anmol@gmail.com"
+  },
+  "description": "Engram — persistent user-level memory shared across AI agents",
+  "plugins": [
+    {
+      "name": "engram",
+      "source": "./engram",
+      "description": "Persistent cross-agent memory: markdown store, session-start recall, lessons, journal. Memory that stays.",
+      "category": "productivity",
+      "tags": ["memory", "persistence", "context", "cross-agent"]
+    }
+  ]
+}

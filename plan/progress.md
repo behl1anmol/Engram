@@ -72,3 +72,35 @@ Decisions:
 - Review queue included only if it fits the budget (budget is a hard cap; queue reappears
   next session — acceptable per §6.4 "lightweight, never nagging").
 - Tests: 42 passing total. Windows: **pending-windows**.
+
+## M3 — Claude Code plugin — 2026-07-18
+
+| AC | Result |
+|----|--------|
+| Fresh install + new session: packet in context, banner exactly once | PASS (subprocess hook tests) |
+| "Remember X" produces schema-valid memory w/ correct type + TTL + index | PASS (test_stored_memory_appears_in_next_session_packet) |
+| No-Python / broken-store session: degrades, never blocks | PASS (corrupt-config test + echo floor in manifest command) |
+| /engram-status reports store stats | PASS (doctor/list --json already covered; skill wraps them) |
+| Plugin loads without warnings | **pending-manual** — structure verified against installed plugin ground truth + official docs; live `/plugin install` needs an interactive session |
+
+Ground truth used (no-hallucination constraint):
+- Installed caveman plugin inspected for real manifest/hook/skill/agent layout
+  (`.claude-plugin/plugin.json`, inline hooks, `${CLAUDE_PLUGIN_ROOT}`, `skills/*/SKILL.md`,
+  `agents/*.md` with tools frontmatter).
+- Marketplace schema fetched from code.claude.com/docs/en/plugin-marketplaces:
+  `.claude-plugin/marketplace.json` at repo root, name/owner/plugins[{name, source, description}].
+  Docs also confirm plugins are cached as a copied directory — plugin cannot reference
+  files outside its root.
+
+Decisions:
+- **Plugin root = `engram/` itself** (manifest at `engram/.claude-plugin/plugin.json`):
+  self-contained per the caching rule above, and `src/engram.py` ships inside the plugin
+  with zero duplication.
+- **Distill flow via SessionStart conventions + skills, not a Stop hook**: SessionStart is
+  verified ground truth; a Stop hook would fire on every reply (noise) and its payload
+  contract was not verifiable here. Conventions block + /engram-distill cover the ACs.
+- Store bootstrap happens in the hook on first activation (installing the plugin is the
+  consent for creating `~/.agent-memory`; the one-time banner explains what appeared).
+- Hook command carries the §13.1 probe chain (`python3` → `python` → `py -3`) with an
+  echo degraded-mode floor, so a Python-less machine still gets memory instructions.
+- Tests: 52 passing total. Windows: **pending-windows**.

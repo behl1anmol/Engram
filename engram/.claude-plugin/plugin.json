@@ -1,0 +1,24 @@
+{
+  "name": "engram",
+  "description": "Persistent user-level memory shared across AI agents. Plain-markdown store the agent recalls at session start and distills into after work — memory that stays.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Anmol Behl",
+    "url": "https://github.com/behl1anmol"
+  },
+  "homepage": "https://github.com/behl1anmol/Engram",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\" 2>/dev/null || python \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\" 2>/dev/null || py -3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\" 2>/dev/null || echo \"Engram (degraded mode): Python 3 was not found, so tooling is offline. Your persistent memory still works: read MEMORY.md in ~/.agent-memory (or %USERPROFILE%\\.agent-memory) and open relevant memory files directly; follow the conventions shown in any existing file. Offer the user a consent-gated Python 3 install (winget install Python.Python.3.12 / sudo apt install python3 / brew install python3) to restore full tooling. Never install without consent.\"",
+            "timeout": 15,
+            "statusMessage": "Recalling Engram memories..."
+          }
+        ]
+      }
+    ]
+  }
+}
