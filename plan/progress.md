@@ -49,3 +49,26 @@ Deviations / decisions:
 - Doctor gained memory-schema / hash-drift / expired checks + `--fix` (re-stamp, sweep)
   early — M1 needed the sweep exercised; full §13.2 checklist still lands in M7.
 - Tests: 30 passing total. Windows: **pending-windows**.
+
+## M2 — Index & recall — 2026-07-18
+
+| AC | Result |
+|----|--------|
+| Lossless rebuild: delete index → reindex → deep-equal | PASS (30-memory fixture) |
+| Recall relevance: matching ranked in, unrelated excluded | PASS |
+| Budget enforcement ≤ budget with stubs | PASS (100-token / 30-memory case) |
+| `times_applied` outranks equal match | PASS |
+| Hand-deleted file self-heals on recall | PASS |
+| MEMORY.md grouped, one line per memory, valid links | PASS |
+
+Decisions:
+- Backend `query()` returns candidates; scoring centralized in `rank_entries`
+  (SQLite backend will pre-filter via FTS, same contract).
+- Token estimator: chars/4 (documented in code — stdlib has no tokenizer; budget is a cap).
+- Two-pass packing: when memories overflow the budget, ~30 tokens reserved so the
+  "not loaded" stub section always fits — agent must always learn unloaded memories exist.
+- Serve-then-heal freshness: recall reads files behind index entries (file = truth, P1);
+  out-of-band expired/hand-edited entries are skipped this call and the index rebuilds after.
+- Review queue included only if it fits the budget (budget is a hard cap; queue reappears
+  next session — acceptable per §6.4 "lightweight, never nagging").
+- Tests: 42 passing total. Windows: **pending-windows**.
