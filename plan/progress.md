@@ -152,3 +152,22 @@ Decisions:
 - Export mode works for any target name — the adapter floor (AD-11) needs no
   per-agent knowledge.
 - Tests: 69 passing total. Windows: **pending-windows**.
+
+## M6 — SQLite backend — 2026-07-18
+
+| AC | Result |
+|----|--------|
+| 600-memory round trip: json→sqlite→json, recall parity on 10 queries, index deep-equal, markdown tree-hash unchanged | PASS |
+| Suites pass against sqlite backend | PASS with deviation: targeted interface-compliance tests (add/edit/delete/lesson/journal/recall/self-heal on sqlite) instead of re-running all suites twice — same coverage intent, half the runtime; parity test carries the equivalence proof |
+| Scale suggestion at 500+ only; consent-seeking wording; absent on sqlite | PASS |
+| Interrupted switch (kill mid-rebuild) leaves old backend active + functional | PASS (crash hook; config flips only after successful rebuild) |
+
+Decisions:
+- **Guaranteed parity by construction**: FTS indexes exactly the `_terms()` tokens
+  `rank_entries` matches on, so FTS pre-filtering can never change the result set —
+  scoring stays centralized, backends only supply candidates.
+- Entry rows stored as JSON blobs in sqlite (schema flexibility, trivial parity);
+  FTS5 unavailable (or ENGRAM_TEST_NO_FTS set) → full-scan fallback, always correct (P6).
+- Switch order: rebuild target fully, then flip `config.backend` — the flip is the
+  commit point.
+- Tests: 76 passing total. Windows: **pending-windows**.

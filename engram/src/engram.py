@@ -577,10 +577,110 @@ class JsonBackend:
         return entries
 
 
+class SqliteBackend:
+    """§10.3 SQLite index backend (stdlib sqlite3, FTS5 when available).
+
+    Same contract as JsonBackend: query() returns candidate entries and
+    rank_entries does the scoring. Parity with JSON is guaranteed by
+    indexing exactly the tokens rank_entries matches on (_terms output),
+    so FTS pre-filtering can never change the result set. Without FTS5
+    (ENGRAM_TEST_NO_FTS or an FTS5-less sqlite build) query falls back to
+    a full scan — always correct, just slower (P6)."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.path = root / "index" / "index.sqlite3"
+
+    def _connect(self):
+        import sqlite3
+        con = sqlite3.connect(self.path)
+        con.execute("CREATE TABLE IF NOT EXISTS entries("
+                    "name TEXT PRIMARY KEY, data TEXT NOT NULL)")
+        self.fts = False
+        if not os.environ.get("ENGRAM_TEST_NO_FTS"):
+            try:
+                con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts "
+                            "USING fts5(name UNINDEXED, terms)")
+                self.fts = True
+            except Exception:
+                self.fts = False
+        return con
+
+    @staticmethod
+    def _entry_terms(e: dict) -> str:
+        blob = " ".join([e["name"], e["description"], " ".join(e.get("tags", []))])
+        return " ".join(sorted(_terms(blob)))
+
+    def _put_con(self, con, e: dict) -> None:
+        con.execute("INSERT OR REPLACE INTO entries(name, data) VALUES(?, ?)",
+                    (e["name"], json.dumps(e)))
+        if self.fts:
+            con.execute("DELETE FROM entries_fts WHERE name = ?", (e["name"],))
+            con.execute("INSERT INTO entries_fts(name, terms) VALUES(?, ?)",
+                        (e["name"], self._entry_terms(e)))
+
+    def put(self, entry: dict) -> None:
+        con = self._connect()
+        with con:
+            self._put_con(con, entry)
+        con.close()
+
+    def get(self, name: str):
+        con = self._connect()
+        row = con.execute("SELECT data FROM entries WHERE name = ?", (name,)).fetchone()
+        con.close()
+        return json.loads(row[0]) if row else None
+
+    def query(self, terms=None) -> list:
+        con = self._connect()
+        if terms and self.fts:
+            toks = sorted(t for t in terms if re.fullmatch(r"[a-z0-9]+", t))
+            if toks:
+                match = " OR ".join(toks)
+                rows = con.execute(
+                    "SELECT e.data FROM entries e JOIN entries_fts f "
+                    "ON e.name = f.name WHERE entries_fts MATCH ?", (match,)).fetchall()
+                con.close()
+                return [json.loads(r[0]) for r in rows]
+        rows = con.execute("SELECT data FROM entries").fetchall()
+        con.close()
+        return [json.loads(r[0]) for r in rows]
+
+    def delete(self, name: str) -> None:
+        con = self._connect()
+        with con:
+            con.execute("DELETE FROM entries WHERE name = ?", (name,))
+            if self.fts:
+                con.execute("DELETE FROM entries_fts WHERE name = ?", (name,))
+        con.close()
+
+    def rebuild(self) -> dict:
+        entries = {}
+        for p in active_memory_files(self.root):
+            try:
+                e = entry_from_file(self.root, p)
+            except (FrontmatterError, EngramError):
+                continue
+            entries[e["name"]] = e
+        con = self._connect()
+        with con:
+            con.execute("DELETE FROM entries")
+            if self.fts:
+                con.execute("DELETE FROM entries_fts")
+            for e in entries.values():
+                self._put_con(con, e)
+        con.close()
+        write_memory_md(self.root, entries)
+        return entries
+
+
+BACKENDS = {"json": JsonBackend, "sqlite": SqliteBackend}
+
+
 def get_backend(root: Path, cfg: dict):
     backend = cfg.get("backend", "json")
-    if backend == "json":
-        return JsonBackend(root)
+    if backend in BACKENDS:
+        return BACKENDS[backend](root)
     raise EngramError(f"Unknown backend {backend!r} in config.json")
 
 
@@ -675,7 +775,7 @@ def build_recall_packet(root: Path, cfg: dict, query: str = "",
     budget = budget or cfg.get("recall_token_budget", 1500)
 
     for attempt in (1, 2):
-        entries = backend.query()
+        entries = backend.query(_terms(query) if query else None)
         non_journal = [e for e in entries if e["type"] != "journal"]
         journal = sorted((e for e in entries if e["type"] == "journal"),
                          key=lambda e: e["created"], reverse=True)[:2]
@@ -1234,11 +1334,19 @@ def cmd_adapt(args) -> int:
 def cmd_reindex(args) -> int:
     root = store_root()
     cfg = require_store(root)
-    if args.backend and args.backend != cfg.get("backend", "json"):
-        raise EngramError(
-            f"Backend switching to {args.backend!r} arrives in M6; current backend: "
-            f"{cfg.get('backend', 'json')}")
-    entries = get_backend(root, cfg).rebuild()
+    current = cfg.get("backend", "json")
+    target = args.backend or current
+    if target not in BACKENDS:
+        raise EngramError(f"Unknown backend {target!r} (json|sqlite)")
+    # §10.1: rebuild is the universal migration primitive. Build the target
+    # index fully first; flip config only after success, so an interrupted
+    # switch leaves the old backend active and intact.
+    entries = BACKENDS[target](root).rebuild()
+    if target != current:
+        cfg["backend"] = target
+        save_config(root, cfg)
+        print(f"Backend switched {current} -> {target} "
+              f"(markdown untouched; switch back anytime with --backend {current}).")
     print(f"Reindexed {len(entries)} active memories; MEMORY.md regenerated.")
     return 0
 
@@ -1348,6 +1456,27 @@ def doctor_checks(root: Path) -> list:
                        "detail": f"{len(expired)} expired memory(ies), --fix archives: {', '.join(expired[:10])}"})
     else:
         checks.append({"check": "expired", "status": "ok", "detail": ""})
+
+    # §10.4 scale detection: suggestion only, upgrade needs user consent
+    try:
+        import time as _time
+        cfg_now = load_config(root)
+        if cfg_now.get("backend", "json") == "json":
+            t0 = _time.monotonic()
+            n_active = len(get_backend(root, cfg_now).query())
+            elapsed = _time.monotonic() - t0
+            if n_active > 500 or elapsed > 0.2:
+                checks.append({
+                    "check": "index-scale", "status": "warn",
+                    "detail": (f"{n_active} active memories, Tier-0 scan {elapsed*1000:.0f}ms — "
+                               f"the JSON index is past its comfort zone. With your consent, "
+                               f"upgrade: engram reindex --backend sqlite "
+                               f"(markdown untouched, reversible)")})
+            else:
+                checks.append({"check": "index-scale", "status": "ok",
+                               "detail": f"{n_active} active, {elapsed*1000:.0f}ms"})
+    except (EngramError, OSError, json.JSONDecodeError):
+        pass  # config problems already reported above
 
     # §8.3: completed months with entries but no rollup
     current_month = today()[:7]
