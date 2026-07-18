@@ -239,6 +239,8 @@ Every write of an existing memory MUST follow:
 
 The window between steps 3 and 4 is not zero — this is *optimistic*. The residual race is microseconds wide and its worst case is handled by §5.5, never silent loss. For human-scale memory writes (a few per session), this is the right trade. New-file creation uses `open(..., 'x')` (exclusive create) to make simultaneous same-name creation explicit.
 
+**Amendment (M4, measured):** under counter contention (concurrent `lesson applied`) the residual window demonstrably loses increments. Steps 3–4 are therefore serialized per-memory with a **micro-lock**: exclusive-create lock file in `locks/`, held for milliseconds, stolen after a 10s staleness timeout. This is not the locking AD-5 rejected — no fcntl/msvcrt, no long holds, and a crashed holder self-heals via the timeout, so there is no stuck-lock failure mode (P6). Out-of-band writers (hand edits) bypass locks and are still caught by the CAS compare.
+
 ### 5.4 Atomic writes
 
 All writes (memories, index, config) MUST be: write to a temp file **in the same directory**, flush + `os.fsync`, then `os.replace(tmp, target)`. `os.replace` is atomic on POSIX and on NTFS. Same-directory is required because rename across filesystems is not atomic. *Result: a reader never sees a half-written file; a crash leaves either the old version or the new one, never a torn file.*

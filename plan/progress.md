@@ -104,3 +104,25 @@ Decisions:
 - Hook command carries the §13.1 probe chain (`python3` → `python` → `py -3`) with an
   echo degraded-mode floor, so a Python-less machine still gets memory instructions.
 - Tests: 52 passing total. Windows: **pending-windows**.
+
+## M4 — Lessons + journal — 2026-07-18
+
+| AC | Result |
+|----|--------|
+| End-to-end lesson loop: capture → recall → applied → counter/expiry/rerank | PASS |
+| Concurrent `lesson applied` never loses an increment | PASS — 2 procs × 25, exact count, 5 repeat runs stable |
+| Journal entry at `journal/YYYY/YYYY-MM/YYYY-MM-DD-slug.md`, 90d TTL, in packet | PASS |
+| Rollup covers month's entries; doctor flag clears; aged entries sweep, rollup survives | PASS |
+
+Deviation (architecture amended):
+- The §5.3 residual CAS race **measurably lost increments** under counter contention
+  (49/50 in the first test run). Fix: per-memory micro-lock (exclusive-create file in
+  `locks/`, ms-held, 10s stale-steal) serializing the check+write section.
+  ARCHITECTURE.md §5.3 amended with rationale; this is not the AD-5-rejected locking —
+  no platform lock APIs, no stuck-lock failure mode. `locks/` dir finally earns its
+  place in the §3.2 tree.
+- `cas_update_retry` (fresh-derive + retry, no conflict files) added for counter-style
+  mutations; plain `cas_update` still preserves conflicts for judgment-carrying edits.
+- Rollup command generates a skeleton (bullets from entries) for the agent to condense
+  via `edit` — narrative quality is agent judgment, not CLI mechanics.
+- Tests: 60 passing total. Windows: **pending-windows**.

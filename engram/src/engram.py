@@ -355,7 +355,56 @@ def create_memory(root: Path, meta: dict, body: str) -> Path:
     return path
 
 
-def cas_update(root: Path, name: str, mutate, agent: str) -> Path:
+class _write_lock:
+    """Short-lived exclusive-create lock in locks/ guarding one memory's
+    check+write section. Stale locks (crashed holder) are stolen after
+    STALE_SECONDS, so nothing ever wedges the store."""
+
+    STALE_SECONDS = 10.0
+    WAIT_SECONDS = 3.0
+
+    def __init__(self, root: Path, name: str):
+        self.path = root / "locks" / f"{name}.lock"
+
+    def __enter__(self):
+        import random
+        import time
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.time() + self.WAIT_SECONDS
+        while True:
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                return self
+            except FileExistsError:
+                try:
+                    age = time.time() - self.path.stat().st_mtime
+                except OSError:
+                    continue  # holder just released; retry create
+                if age > self.STALE_SECONDS:
+                    try:
+                        self.path.unlink()
+                    except OSError:
+                        pass
+                    continue
+                if time.time() > deadline:
+                    raise EngramError(
+                        f"Store busy: could not lock '{self.path.stem}' within "
+                        f"{self.WAIT_SECONDS}s — retry, or remove a stale "
+                        f"{self.path} if no other agent is running")
+                time.sleep(random.uniform(0.002, 0.015))
+
+    def __exit__(self, *exc):
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def cas_update(root: Path, name: str, mutate, agent: str,
+               preserve_conflict: bool = True) -> Path:
     """Optimistic compare-and-swap update (§5.3).
 
     `mutate(meta, body) -> (meta, body)` builds the intended new version.
@@ -363,6 +412,9 @@ def cas_update(root: Path, name: str, mutate, agent: str) -> Path:
     stored body hash alone, since it also catches metadata-only races
     (e.g. concurrent pin vs expire) that share a body hash.
     On conflict the intended version goes to conflicts/, nothing is lost (§5.5).
+    `preserve_conflict=False` skips that file — only for callers that retry
+    with a freshly derived mutation (e.g. counter bumps), where the losing
+    intermediate is not user judgment worth keeping.
     """
     path = find_memory(root, name)
     raw_read, meta, body = read_memory(path)
@@ -371,14 +423,40 @@ def cas_update(root: Path, name: str, mutate, agent: str) -> Path:
     new_meta["hash"] = body_hash(new_body)
     new_meta["source_agent"] = agent
     validate_meta(new_meta)
-    raw_current = path.read_text(encoding="utf-8")
-    if raw_current != raw_read:
-        conflict_path = (root / "conflicts" /
-                         f"{name}.{utc_stamp()}.{os.getpid()}.{agent}.md")
-        atomic_write_text(conflict_path, serialize_memory(new_meta, new_body))
-        raise ConflictError(name, conflict_path)
-    atomic_write_text(path, serialize_memory(new_meta, new_body))
+    # Micro-lock around check+write: closes the §5.3 residual race between
+    # engram processes (proven to lose counter increments under contention).
+    # Not the locking AD-5 rejected: held for milliseconds, exclusive-create
+    # (portable on POSIX/NTFS), and a crashed holder self-heals via the
+    # stale-steal timeout — no stuck-lock failure mode (P6). Out-of-band
+    # writers (hand edits) are still caught by the raw-text compare below.
+    with _write_lock(root, name):
+        raw_current = path.read_text(encoding="utf-8")
+        if raw_current != raw_read:
+            if not preserve_conflict:
+                raise ConflictError(name, "(retryable — no conflict file written)")
+            conflict_path = (root / "conflicts" /
+                             f"{name}.{utc_stamp()}.{os.getpid()}.{agent}.md")
+            atomic_write_text(conflict_path, serialize_memory(new_meta, new_body))
+            raise ConflictError(name, conflict_path)
+        atomic_write_text(path, serialize_memory(new_meta, new_body))
     return path
+
+
+def cas_update_retry(root: Path, name: str, mutate, agent: str,
+                     attempts: int = 8) -> Path:
+    """CAS with retry for mutations derived freshly from current state each
+    attempt (increments, renewals). Safe because losing an attempt loses
+    nothing: the next attempt re-reads and re-derives (§7.4)."""
+    import random
+    import time
+    last = None
+    for _ in range(attempts):
+        try:
+            return cas_update(root, name, mutate, agent, preserve_conflict=False)
+        except ConflictError as e:
+            last = e
+            time.sleep(random.uniform(0.005, 0.05))
+    raise last
 
 
 def archive_memory(root: Path, path: Path, meta: dict, body: str) -> Path:
@@ -892,6 +970,122 @@ def cmd_list(args) -> int:
     return 0
 
 
+def cmd_lesson(args) -> int:
+    root = store_root()
+    cfg = require_store(root)
+    if args.action != "applied":
+        raise EngramError("Supported: engram lesson applied <name>")
+
+    def mutate(meta, body):
+        if meta.get("type") != "lesson":
+            raise EngramError(f"'{args.name}' is type {meta.get('type')!r}, not a lesson")
+        meta["times_applied"] = int(meta.get("times_applied", 0)) + 1
+        meta["last_applied"] = today()
+        if meta.get("expires") != "never":
+            # §7.4 renewal-on-use: applying a lesson extends its life
+            meta["expires"] = default_expiry(cfg, "lesson")
+        return meta, body
+
+    path = cas_update_retry(root, args.name, mutate, current_agent())
+    index_put(root, cfg, path)
+    _, meta, _ = read_memory(path)
+    print(f"Lesson '{args.name}' reinforced: times_applied={meta['times_applied']}, "
+          f"expires {meta['expires']}")
+    return 0
+
+
+def journal_month_dirs(root: Path):
+    """Yield (YYYY-MM, dir) for every month directory under journal/."""
+    jd = root / "journal"
+    if not jd.is_dir():
+        return
+    for ydir in sorted(d for d in jd.iterdir() if d.is_dir()):
+        for mdir in sorted(d for d in ydir.iterdir() if d.is_dir()):
+            yield mdir.name, mdir
+
+
+def cmd_journal(args) -> int:
+    root = store_root()
+    cfg = require_store(root)
+
+    if args.rollup:
+        if not re.match(r"^\d{4}-\d{2}$", args.rollup):
+            raise EngramError(f"--rollup wants YYYY-MM, got {args.rollup!r}")
+        month = args.rollup
+        year = month[:4]
+        mdir = root / "journal" / year / month
+        entries = sorted(mdir.glob("*.md")) if mdir.is_dir() else []
+        if not entries:
+            raise EngramError(f"No journal entries found for {month}")
+        bullets = []
+        for p in entries:
+            try:
+                _, m, _ = read_memory(p)
+                bullets.append(f"- {m['created']}: {m['description']}")
+            except FrontmatterError:
+                continue
+        body = (f"Rollup of {len(bullets)} session(s) in {month}.\n\n"
+                + "\n".join(bullets)
+                + "\n\n(Themes and narrative: condense to <= 15 lines via `engram edit` — §8.3.)\n")
+        name = f"{month}-rollup"
+        meta = {
+            "name": name,
+            "description": f"Monthly journal rollup for {month}",
+            "type": "journal",
+            "created": today(),
+            "updated": today(),
+            "expires": (date.today() + timedelta(days=365)).isoformat(),
+            "source_agent": current_agent(),
+            "tags": ["rollup"],
+        }
+        meta["hash"] = body_hash(body)
+        validate_meta(meta)
+        path = root / "journal" / year / f"{name}.md"
+        if path.exists():
+            raise EngramError(f"Rollup already exists: {path} (edit it instead)")
+        atomic_write_text(path, serialize_memory(meta, body))
+        index_put(root, cfg, path)
+        print(f"Rollup skeleton -> {path} (condense narrative via engram edit)")
+        return 0
+
+    if not args.slug:
+        raise EngramError("Provide --slug (or --rollup YYYY-MM)")
+    if not args.description:
+        raise EngramError("--description is required with --slug")
+    if not NAME_RE.match(args.slug):
+        raise EngramError(f"--slug must be kebab-case, got {args.slug!r}")
+    body = read_body_input(args)
+    hit = scan_secrets(body, cfg)
+    if hit:
+        raise EngramError(
+            f"Refusing to store: content matches secret deny-pattern [{hit}] (§14).")
+    d = date.today()
+    name = f"{d.isoformat()}-{args.slug}"
+    if len(name) > 64:
+        raise EngramError("Slug too long: dated name must stay <= 64 chars")
+    meta = {
+        "name": name,
+        "description": args.description,
+        "type": "journal",
+        "created": d.isoformat(),
+        "updated": d.isoformat(),
+        "expires": default_expiry(cfg, "journal"),
+        "source_agent": current_agent(),
+    }
+    if args.tags:
+        meta["tags"] = [t.strip() for t in args.tags.split(",") if t.strip()]
+    meta["hash"] = body_hash(body)
+    validate_meta(meta)
+    # §8.2 dated path: journal/YYYY/YYYY-MM/YYYY-MM-DD-slug.md
+    path = root / "journal" / f"{d.year:04d}" / f"{d.year:04d}-{d.month:02d}" / f"{name}.md"
+    if path.exists():
+        raise EngramError(f"Entry {name} already exists (edit it instead)")
+    atomic_write_text(path, serialize_memory(meta, body))
+    index_put(root, cfg, path)
+    print(f"Journal entry -> {path}")
+    return 0
+
+
 def cmd_reindex(args) -> int:
     root = store_root()
     cfg = require_store(root)
@@ -1009,6 +1203,21 @@ def doctor_checks(root: Path) -> list:
                        "detail": f"{len(expired)} expired memory(ies), --fix archives: {', '.join(expired[:10])}"})
     else:
         checks.append({"check": "expired", "status": "ok", "detail": ""})
+
+    # §8.3: completed months with entries but no rollup
+    current_month = today()[:7]
+    missing_rollups = []
+    for month, mdir in journal_month_dirs(root):
+        if month >= current_month:
+            continue  # only completed months
+        if any(mdir.glob("*.md")) and not (mdir.parent / f"{month}-rollup.md").exists():
+            missing_rollups.append(month)
+    if missing_rollups:
+        checks.append({"check": "journal-rollups", "status": "warn",
+                       "detail": ("Months lacking a rollup (engram journal --rollup <YYYY-MM>): "
+                                  + ", ".join(missing_rollups))})
+    else:
+        checks.append({"check": "journal-rollups", "status": "ok", "detail": ""})
 
     # §3.1 WSL dual-store advisory: advisory only, never automatic.
     if is_wsl() and not os.environ.get("ENGRAM_HOME"):
@@ -1135,6 +1344,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--archived", action="store_true", help="list archive/ instead")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_list)
+
+    sp = sub.add_parser("lesson", help="lesson operations (self-learning loop)")
+    sp.add_argument("action", choices=["applied"],
+                    help="applied: reinforce a lesson that changed behavior this session")
+    sp.add_argument("name")
+    sp.set_defaults(func=cmd_lesson)
+
+    sp = sub.add_parser("journal", help="add a session journal entry or monthly rollup")
+    sp.add_argument("--slug", help="kebab-case topic slug; entry name becomes YYYY-MM-DD-<slug>")
+    sp.add_argument("--description", help="one-line summary (required with --slug)")
+    sp.add_argument("--tags", help="comma-separated keywords")
+    sp.add_argument("--body-file", help="read body from file (default: stdin)")
+    sp.add_argument("--rollup", metavar="YYYY-MM",
+                    help="generate the monthly rollup skeleton instead")
+    sp.set_defaults(func=cmd_journal)
 
     sp = sub.add_parser("reindex", help="rebuild index and MEMORY.md from markdown")
     sp.add_argument("--backend", choices=["json", "sqlite"],

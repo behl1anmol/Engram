@@ -16,8 +16,11 @@ Walk this checklist against the session; store only what passes the durability b
 
 Then tell the user in 1–2 lines what was persisted (or that nothing met the bar).
 
-Journal entry (skip if `engram journal` is unavailable — it arrives with M4; note it for next session instead):
+Journal entry:
 
 ```bash
-echo "<3-6 line narrative>" | ENGRAM_AGENT=claude-code python3 "<engram_py>" journal --slug short-topic-slug
+echo "<3-6 line narrative>" | ENGRAM_AGENT=claude-code python3 "<engram_py>" journal \
+  --slug short-topic-slug --description "One-line summary of the session"
 ```
+
+If a recall packet or `doctor` flagged a completed month lacking a rollup, offer to generate it: `journal --rollup YYYY-MM`, then condense the skeleton to ≤ 15 lines via `edit`.
