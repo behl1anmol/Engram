@@ -29,4 +29,6 @@ echo "<body>" | ENGRAM_AGENT=claude-code python3 "<engram_py>" add \
 - Absolute ISO dates in bodies, never "last week".
 - Never store secrets — the CLI rejects them, don't try to rephrase around it.
 - Omit `--expires` to accept the type's default TTL; use `--expires never` only for durable identity facts.
+- **Time-bound fact with a known end?** Set expiry to that end: `expire <name> --in 4y` (units d/w/m/y) or `--expires YYYY-MM-DD`. If the duration is knowable but the user didn't say, ask ("how long will that be true?").
+- **Innate fact** (name, hobbies, durable identity)? Offer to lock it: `protect <name>` makes it readonly for agents and pins it. Only protect with the user's agreement — it adds friction to every future correction.
 - Confirm to the user what was stored, in one line.

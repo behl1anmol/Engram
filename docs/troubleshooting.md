@@ -36,6 +36,10 @@ A writer crashed inside a millisecond-held write lock. Stale locks self-heal aft
 
 Two writers raced; the loser's full intended version is in `conflicts/<name>.<stamp>.<agent>.md`. Nothing was lost. Compare with the live memory, merge via `engram edit`, delete the conflict file.
 
+## "'X' is protected — edit/delete refused"
+
+Working as intended: the memory is marked readonly for agents (`protected: true`). If the change is genuinely wanted, run `engram unprotect <name>`, retry, then `engram protect <name>` again if it should stay locked. Agents should relay this to the user rather than unprotecting on their own initiative (rule 19).
+
 ## A memory refuses to store (secret pattern)
 
 Working as intended — the body matched a credential pattern (§14). Store *where* a credential lives (vault path, env var name), never the credential.

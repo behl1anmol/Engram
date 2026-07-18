@@ -53,8 +53,9 @@ DEFAULT_CONFIG = {
 
 # §4.2 frontmatter schema. Serialization keeps this order for diff-friendly files.
 FIELD_ORDER = (
-    "name", "description", "type", "created", "updated", "expires", "hash",
-    "source_agent", "tags", "links", "times_applied", "last_applied", "archived",
+    "name", "description", "type", "created", "updated", "expires", "protected",
+    "hash", "source_agent", "tags", "links", "times_applied", "last_applied",
+    "archived",
 )
 REQUIRED_FIELDS = ("name", "description", "type", "created", "updated",
                    "expires", "hash", "source_agent")
@@ -64,7 +65,22 @@ INT_FIELDS = {"times_applied"}
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 KEY_RE = re.compile(r"^[a-z_]+$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-TTL_RE = re.compile(r"^(\d+)d$")
+
+# Durations: days, weeks, months (~30d), years (~365d). Approximations are
+# deliberate and documented — expiry is a review trigger, not a contract date.
+DURATION_RE = re.compile(r"^(\d+)([dwmy])$")
+DURATION_DAYS = {"d": 1, "w": 7, "m": 30, "y": 365}
+
+
+def parse_duration_days(s: str, flag: str) -> int:
+    m = DURATION_RE.match(s)
+    if not m:
+        raise EngramError(f"{flag} wants a duration like 30d, 6w, 18m, 4y — got {s!r}")
+    return int(m.group(1)) * DURATION_DAYS[m.group(2)]
+
+
+def is_protected(meta: dict) -> bool:
+    return str(meta.get("protected", "")).lower() == "true"
 
 # §14 secret deny-patterns. Writers refuse content matching any of these.
 SECRET_PATTERNS = (
@@ -273,6 +289,9 @@ def validate_meta(meta: dict, origin: str = "<memory>") -> None:
         raise FrontmatterError(f"{origin}: expires must be ISO date or 'never'")
     if len(meta["description"]) > 120:
         raise FrontmatterError(f"{origin}: description over 120 chars (§9.5)")
+    prot = meta.get("protected")
+    if prot is not None and str(prot).lower() not in ("true", "false"):
+        raise FrontmatterError(f"{origin}: protected must be true or false")
 
 
 # ---------------------------------------------------------------------------
@@ -331,10 +350,8 @@ def default_expiry(cfg: dict, mtype: str) -> str:
     ttl = cfg.get("ttl_defaults", {}).get(mtype, "never")
     if ttl == "never":
         return "never"
-    m = TTL_RE.match(ttl)
-    if not m:
-        raise EngramError(f"config ttl_defaults.{mtype} invalid: {ttl!r} (want 'Nd' or 'never')")
-    return (date.today() + timedelta(days=int(m.group(1)))).isoformat()
+    days = parse_duration_days(ttl, f"config ttl_defaults.{mtype}")
+    return (date.today() + timedelta(days=days)).isoformat()
 
 
 def create_memory(root: Path, meta: dict, body: str) -> Path:
@@ -479,6 +496,8 @@ def sweep_expired(root: Path):
             _, meta, body = read_memory(path)
         except FrontmatterError:
             continue  # nonconforming files are doctor's business, not sweep's
+        if is_protected(meta):
+            continue  # protected: no automated lifecycle action, ever (§6.6)
         exp = meta.get("expires", "never")
         if exp != "never" and DATE_RE.match(exp) and date.fromisoformat(exp) < today_d:
             swept.append(archive_memory(root, path, meta, body))
@@ -516,6 +535,7 @@ def entry_from_file(root: Path, path: Path) -> dict:
         "expires": meta["expires"],
         "hash": meta["hash"],
         "times_applied": meta.get("times_applied", 0),
+        "protected": is_protected(meta),
     }
 
 
@@ -730,8 +750,10 @@ def rank_entries(entries: list, query: str = "") -> list:
     scored = []
     for e in entries:
         exp = e.get("expires", "never")
-        if exp != "never" and DATE_RE.match(exp) and date.fromisoformat(exp) < today_d:
+        if (exp != "never" and DATE_RE.match(exp)
+                and date.fromisoformat(exp) < today_d and not e.get("protected")):
             continue  # expired but not yet swept: never serve stale memories
+            # (protected past-due entries stay served — user hasn't decided yet, §6.6)
         overlap = 0
         if q:
             overlap += 3 * len(q & _terms(" ".join(e.get("tags", []))))
@@ -756,12 +778,22 @@ def rank_entries(entries: list, query: str = "") -> list:
 
 
 def expiring_soon(entries: list, days: int = 14, cap: int = 3) -> list:
-    """§6.4 review queue: <= cap memories expiring within `days`."""
+    """§6.4 review queue: <= cap memories expiring within `days`.
+
+    Protected memories are never auto-archived (§6.6), so past-due protected
+    entries stay in this queue until the user extends or unprotects them —
+    the queue is the only lifecycle mechanism protection leaves in place."""
     horizon = date.today() + timedelta(days=days)
-    soon = [e for e in entries
-            if e.get("expires", "never") != "never"
-            and DATE_RE.match(e["expires"])
-            and date.today() <= date.fromisoformat(e["expires"]) <= horizon]
+    soon = []
+    for e in entries:
+        exp = e.get("expires", "never")
+        if exp == "never" or not DATE_RE.match(exp):
+            continue
+        exp_d = date.fromisoformat(exp)
+        if e.get("protected") and exp_d <= horizon:
+            soon.append(e)
+        elif date.today() <= exp_d <= horizon:
+            soon.append(e)
     soon.sort(key=lambda e: e["expires"])
     return soon[:cap]
 
@@ -813,7 +845,8 @@ def build_recall_packet(root: Path, cfg: dict, query: str = "",
             stale = True
             return None
         exp = meta.get("expires", "never")
-        if exp != "never" and DATE_RE.match(exp) and date.fromisoformat(exp) < today_d:
+        if (exp != "never" and DATE_RE.match(exp)
+                and date.fromisoformat(exp) < today_d and not is_protected(meta)):
             stale = True
             return None
         if meta.get("hash") != e.get("hash"):
@@ -825,7 +858,8 @@ def build_recall_packet(root: Path, cfg: dict, query: str = "",
         body = fresh(e)
         if body is None:
             continue
-        candidates.append((e, f"## {e['name']} ({e['type']})\n"
+        label = e["type"] + (", protected" if e.get("protected") else "")
+        candidates.append((e, f"## {e['name']} ({label})\n"
                               f"_{e['description']}_\n\n{body.rstrip()}\n"))
 
     # Two-pass packing: if not everything fits, re-pack with ~30 tokens held
@@ -1005,6 +1039,7 @@ def cmd_edit(args) -> int:
             f"Refusing to store: content matches secret deny-pattern [{hit}] (§14).")
 
     def mutate(meta, _body):
+        require_unprotected(meta, args.name, "edit")
         if args.description:
             meta["description"] = args.description
         return meta, new_body
@@ -1015,14 +1050,57 @@ def cmd_edit(args) -> int:
     return 0
 
 
+def require_unprotected(meta: dict, name: str, action: str) -> None:
+    """§6.6 protection gate: two-step friction, not a security boundary —
+    the user can always `unprotect` first or hand-edit their own files."""
+    if is_protected(meta):
+        raise EngramError(
+            f"'{name}' is protected — {action} refused. If the user explicitly "
+            f"wants this, run: engram unprotect {name}  (then retry)")
+
+
 def cmd_delete(args) -> int:
     root = store_root()
     cfg = require_store(root)
     path = find_memory(root, args.name)
     _, meta, body = read_memory(path)
+    require_unprotected(meta, args.name, "delete")
     dest = archive_memory(root, path, meta, body)
     index_delete(root, cfg, args.name)
     print(f"Archived '{args.name}' -> {dest} (restore by moving back; purge removes permanently)")
+    return 0
+
+
+def cmd_protect(args) -> int:
+    root = store_root()
+    cfg = require_store(root)
+
+    def mutate(meta, body):
+        meta["protected"] = "true"
+        if not args.keep_expiry:
+            meta["expires"] = "never"  # innate facts: protect implies pin by default
+        return meta, body
+
+    path = cas_update(root, args.name, mutate, current_agent())
+    index_put(root, cfg, path)
+    _, meta, _ = read_memory(path)
+    print(f"Protected '{args.name}' (agents cannot edit/delete it; expires: "
+          f"{meta['expires']}). Undo: engram unprotect {args.name}")
+    return 0
+
+
+def cmd_unprotect(args) -> int:
+    root = store_root()
+    cfg = require_store(root)
+
+    def mutate(meta, body):
+        meta.pop("protected", None)
+        return meta, body
+
+    path = cas_update(root, args.name, mutate, current_agent())
+    index_put(root, cfg, path)
+    print(f"Unprotected '{args.name}' — normal lifecycle applies again "
+          f"(expiry unchanged: adjust with pin/expire if needed)")
     return 0
 
 
@@ -1043,10 +1121,8 @@ def cmd_pin(args) -> int:
 def cmd_expire(args) -> int:
     root = store_root()
     cfg = require_store(root)
-    m = TTL_RE.match(args.in_)
-    if not m:
-        raise EngramError(f"--in wants 'Nd' (e.g. 30d), got {args.in_!r}")
-    new_date = (date.today() + timedelta(days=int(m.group(1)))).isoformat()
+    days = parse_duration_days(args.in_, "--in")
+    new_date = (date.today() + timedelta(days=days)).isoformat()
 
     def mutate(meta, body):
         meta["expires"] = new_date
@@ -1090,7 +1166,9 @@ def cmd_list(args) -> int:
             entries = [e for e in entries if e["type"] == args.type]
         if args.expiring:
             entries = expiring_soon(entries, cap=len(entries) or 1)
-        rows = [(e["name"], e["type"], e["expires"], e["description"])
+        rows = [(e["name"], e["type"],
+                 e["expires"] + (" [protected]" if e.get("protected") else ""),
+                 e["description"])
                 for e in sorted(entries, key=lambda e: (e["type"], e["name"]))]
     if args.json:
         print(json.dumps([{"name": n, "type": t, "expires": x, "description": d}
@@ -1281,7 +1359,10 @@ During/after sessions, persist durable facts (same env prefix):
 
 Rules: one fact per file; descriptions <= 120 chars; absolute ISO dates only;
 never store secrets (writes are scanned and refused); check existing memories
-before adding (`list --json`). Health: `... "{engram_py}" doctor`.
+before adding (`list --json`); time-bound facts get expiry set to their known
+end (`expire <name> --in 4y`, units d/w/m/y — ask the user if unstated);
+memories marked `protected` are readonly for you (no edit/delete/unprotect on
+your own initiative). Health: `... "{engram_py}" doctor`.
 {BLOCK_END}"""
 
 
@@ -1391,11 +1472,8 @@ def cmd_reindex(args) -> int:
 def cmd_purge(args) -> int:
     root = store_root()
     require_store(root)
-    m = TTL_RE.match(args.older_than)
-    if not m:
-        raise EngramError(f"--older-than wants 'Nd' (e.g. 90d), got {args.older_than!r}")
-    cutoff = date.today() - timedelta(days=int(m.group(1)))
-    victims = []
+    cutoff = date.today() - timedelta(days=parse_duration_days(args.older_than, "--older-than"))
+    victims, shielded = [], []
     for p in sorted((root / "archive").glob("*.md")):
         try:
             _, meta, _ = read_memory(p)
@@ -1403,7 +1481,13 @@ def cmd_purge(args) -> int:
             continue
         archived = meta.get("archived")
         if archived and DATE_RE.match(archived) and date.fromisoformat(archived) < cutoff:
+            if is_protected(meta):
+                shielded.append(p.name)  # hand-archived while protected: never purge
+                continue
             victims.append(p)
+    if shielded:
+        print(f"Skipping {len(shielded)} protected archived file(s) "
+              f"(unprotect to purge): {', '.join(shielded[:5])}")
     if not victims:
         print("Nothing in archive older than cutoff.")
         return 0
@@ -1476,8 +1560,9 @@ def doctor_checks(root: Path) -> list:
         if meta["hash"] != body_hash(body):
             drift.append(p.name)
         exp = meta.get("expires", "never")
-        if exp != "never" and DATE_RE.match(exp) and date.fromisoformat(exp) < today_d:
-            expired.append(p.name)
+        if (exp != "never" and DATE_RE.match(exp)
+                and date.fromisoformat(exp) < today_d and not is_protected(meta)):
+            expired.append(p.name)  # protected past-due: review queue's job (§6.6)
     if bad:
         checks.append({"check": "memory-schema", "status": "warn",
                        "detail": f"{len(bad)} nonconforming file(s), skipped by index: " + "; ".join(bad[:5])})
@@ -1690,13 +1775,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("name")
     sp.set_defaults(func=cmd_pin)
 
-    sp = sub.add_parser("expire", help="set expiry N days from now")
+    sp = sub.add_parser("protect",
+                        help="mark a memory readonly for agents; pins it unless --keep-expiry (§6.6)")
     sp.add_argument("name")
-    sp.add_argument("--in", dest="in_", required=True, metavar="Nd")
+    sp.add_argument("--keep-expiry", action="store_true",
+                    help="keep the current expiry (protected but time-bound, e.g. 'in college until 2030')")
+    sp.set_defaults(func=cmd_protect)
+
+    sp = sub.add_parser("unprotect", help="remove protection; lifecycle applies again")
+    sp.add_argument("name")
+    sp.set_defaults(func=cmd_unprotect)
+
+    sp = sub.add_parser("expire", help="set expiry a duration from now")
+    sp.add_argument("name")
+    sp.add_argument("--in", dest="in_", required=True, metavar="N[dwmy]",
+                    help="e.g. 30d, 6w, 18m, 4y (m~30d, y~365d)")
     sp.set_defaults(func=cmd_expire)
 
     sp = sub.add_parser("purge", help="permanently delete old archived memories")
-    sp.add_argument("--older-than", required=True, metavar="Nd")
+    sp.add_argument("--older-than", required=True, metavar="N[dwmy]")
     sp.add_argument("--yes", action="store_true", help="skip confirmation (agents)")
     sp.set_defaults(func=cmd_purge)
 

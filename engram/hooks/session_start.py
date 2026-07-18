@@ -60,6 +60,11 @@ During and at the natural end of a session, persist what is durable:
   same fact — update it (edit) instead of duplicating; delete wrong memories.
 - One fact per memory; description <= 120 chars, discriminating; body <= ~150 words.
 - Absolute ISO dates only. Never store secrets/credentials (writes are scanned).
+- Time-bound fact with known end -> set expiry to it (`expire <name> --in 4y`,
+  units d/w/m/y); ask the user when the duration is knowable but unstated.
+- Memories marked `protected` are readonly for you: no edit/delete/unprotect on
+  your own initiative — relay to the user. Offer `protect <name>` for innate
+  facts (name, hobbies) with the user's agreement.
 - User says "remember X" -> store it now, not at session end.
 """
 

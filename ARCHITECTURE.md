@@ -192,6 +192,7 @@ Field rules:
 | `created` / `updated` | yes | ISO 8601 date (`YYYY-MM-DD`). **Absolute dates only** — never "last week" (rationale: relative dates rot; agents read these months later) |
 | `expires` | yes | ISO 8601 date or literal `never` |
 | `hash` | yes | first 16 hex chars of SHA-256 of the body (everything after the closing `---`, normalized to `\n` line endings, stripped of trailing whitespace). Truncation rationale: 64 bits is far beyond collision risk for integrity checking within one user's store, and short hashes keep frontmatter human-scannable |
+| `protected` | no | `true` marks the memory readonly for agents (§6.6): edit/delete refuse until `unprotect`; exempt from every automated lifecycle action |
 | `source_agent` | yes | which agent wrote/last updated it (`claude-code`, `codex`, `copilot`, `opencode`, `user`, …) |
 | `tags` | no | lowercase keywords for recall matching |
 | `links` | no | list of other memories' `name` slugs; body may also use `[[name]]` wiki links. Dangling links are legal — they mark memories worth writing |
@@ -271,6 +272,8 @@ Memories rot: preferences change, projects finish, references die. A store that 
 
 Per-type default TTLs live in `config.json` (§3.3): `user` facts never expire by default (identity is durable); `journal` entries expire fastest (superseded by rollups). Every default is a *default*: any memory can set `expires: never` (pinned) or any explicit date. The user overrides via `engram pin <name>`, `engram expire <name> --in 30d`, or by editing the file.
 
+**Variable durations (M8 amendment):** duration flags and `ttl_defaults` accept `N[dwmy]` — days, weeks, months (~30d), years (~365d). The approximations are deliberate: expiry is a review trigger, not a contract date (AD-15). Agents SHOULD set expiry to the *known* end of time-bound facts ("in college for 4 more years" → `--in 4y`, or an explicit `--expires` date) and ask the user when the duration is knowable but unstated.
+
 ### 6.3 Soft delete first
 
 Expired memories and `engram delete` targets move to `archive/` with a `archived: <date>` frontmatter stamp — they leave the index (invisible to recall) but stay on disk. Hard purge (`engram purge --older-than 90d`) is a separate, explicit, confirmed command. *Rationale: expiry is a heuristic; heuristics need an undo. Never silent data loss extends to lifecycle.*
@@ -282,6 +285,17 @@ Expired memories and `engram delete` targets move to `archive/` with a `archived
 ### 6.5 Update-over-create
 
 Before creating any memory, the writer MUST check the index for an existing memory covering the same fact (match on name similarity + tags) and update it instead of duplicating. Wrong memories get deleted, not corrected-alongside. *Rationale: duplicates split reinforcement counts and double token cost.*
+
+### 6.6 Protected memories (M8 amendment)
+
+Some facts are innate — the user's name, hobbies, durable preferences — and the user may never want an agent to curate them away. `protected: true` in frontmatter marks a memory **readonly for agents**:
+
+- `edit` and `delete` refuse with a pointer to `engram unprotect <name>` — a deliberate two-step, so accidental agent curation is blocked while deliberate user action stays easy.
+- The expiry sweep, `doctor --fix`, and `purge` never touch protected memories: **protection means no automated lifecycle action, ever.**
+- A protected memory whose user-chosen expiry passes (protected + `--keep-expiry`, e.g. "in college until 2030") is *not* archived and *keeps being served by recall* — it surfaces in the §6.4 review queue until the user extends or unprotects it. Stale-but-locked beats silently-vanished for identity-adjacent facts.
+- `engram protect <name>` also pins (`expires: never`) by default — innate facts are the common case; `--keep-expiry` preserves a deliberate date.
+
+**Honest boundary:** this is CLI-level friction, not security. The store is the user's plain markdown (P1); hand edits always work and always win. Protection guards against agent overreach and accidents — the same trust model the store already has. (AD-14.)
 
 ---
 
@@ -601,6 +615,11 @@ The developing agent MUST hold these while building; each cites its source.
 17. Skip journal entries for sessions with nothing durable; write monthly rollups. (§8)
 18. Cross-link related memories with `links`/`[[name]]`. (§4.2)
 
+**M8 additions**
+
+19. (MUST) Tooling never edits, deletes, archives, sweeps, or purges a `protected` memory; the only sanctioned path is user-driven `unprotect` first. (§6.6)
+20. (SHOULD) Time-bound facts get expiry set to their known end (`N[dwmy]` or explicit date); agents ask the user when a duration is knowable but unstated. (§6.2)
+
 ---
 
 ## Appendix A — Example files
@@ -715,6 +734,8 @@ Same block as C.2, placed in the user-level `AGENTS.md` (Codex) or user `copilot
 | AD-11 | Instructions block is the adapter floor; hooks are an upgrade | Hook-only integrations | Hook APIs vary and churn across agents; an instructions floor means any agent that reads an instructions file works on day one. |
 | AD-12 | Dot-directory in `$HOME`, overridable via `ENGRAM_HOME` | XDG/AppData/Library platform-native dirs | One predictable path across platforms and agents beats three platform-correct ones; env override serves purists; WSL dual-home handled by doctor (§3.1). |
 | AD-13 | Recall budget default 1500 tokens | Unlimited; per-type budgets | Bounded, invisible against modern context sizes, forces ranking discipline; tunable in config; refined with real data in M2. |
+| AD-14 | Protected memories = CLI two-step friction, not enforcement | (a) OS file permissions; (b) no protection concept, rely on pin | (a) breaks P1 (user editability) and fails cross-platform (NTFS ACLs vs POSIX modes) while agents often run as the user anyway; (b) pin only stops expiry — agents could still edit/delete innate facts. Friction blocks accidental curation; the trust model stays what it always was. **User-approved 2026-07-18.** |
+| AD-15 | Durations `N[dwmy]` with fixed approximations (m=30d, y=365d) | Calendar-accurate arithmetic (dateutil-style) | Expiry is a review trigger, not a contract date — a few days' drift on a 4-year horizon is noise; calendar math adds code for no behavioral difference and stdlib has no relativedelta (P5). **User-approved 2026-07-18.** |
 
 ## Appendix E — Glossary
 
@@ -725,6 +746,7 @@ Same block as C.2, placed in the user-level `AGENTS.md` (Codex) or user `copilot
 | **Lesson** | Memory type recording a mistake→correction or confirmed approach; drives self-learning |
 | **Journal** | Compact per-session narrative entries; the user-journey tier |
 | **Rollup** | Monthly summary that supersedes expiring journal entries |
+| **Protected memory** | `protected: true` — readonly for agents; no automated lifecycle action ever (§6.6) |
 | **Recall packet** | The budget-capped markdown block `engram recall` emits for context injection |
 | **CAS** | Compare-and-swap: hash-checked optimistic write protocol (§5.3) |
 | **Adapter** | Thin per-agent integration (hooks/instructions) over the shared core |

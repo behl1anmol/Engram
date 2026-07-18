@@ -33,12 +33,28 @@ Memories expire so the store stays believable. You always override:
 
 ```bash
 engram pin <name>              # expires: never
-engram expire <name> --in 90d  # push the date out
+engram expire <name> --in 90d  # durations: Nd / Nw / Nm (~30d) / Ny (~365d), e.g. --in 4y
 engram delete <name>           # soft: moves to archive/ (restorable by moving back)
 engram purge --older-than 90d  # hard-delete old archive entries; asks for confirmation
 ```
 
 Recall surfaces up to 3 memories expiring within 14 days per session — answer pin / extend / let lapse and the nagging stays light.
+
+**Time-bound facts:** when the end is known, put it in the expiry — "in college for 4 more years" is `engram expire in-college --in 4y` (or `--expires 2030-06-01` at add time). Month/year durations are approximations (30d/365d) on purpose: expiry is a review trigger, not a deadline.
+
+## Protected memories — readonly for agents
+
+Innate facts (your name, hobbies, durable preferences) can be locked so no agent edits or deletes them:
+
+```bash
+engram protect users-name                  # locks it AND pins it (expires: never)
+engram protect in-college --keep-expiry    # locked, but keeps its end date
+engram unprotect users-name                # deliberate two-step to unlock
+```
+
+While protected: `edit`/`delete` refuse (pointing at `unprotect`), the expiry sweep / `doctor --fix` / `purge` never touch it, and if a kept expiry date passes the memory *stays served* and sits in the review queue until you decide. Shown as `[protected]` in `list` and `(type, protected)` in recall packets.
+
+This is friction against accidental agent curation, not security — the files are yours and hand edits always win.
 
 ## Lessons — the self-learning loop
 

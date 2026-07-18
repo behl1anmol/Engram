@@ -216,3 +216,24 @@ Decisions:
 Open items (all logged, none blocking): pending-windows verification across suites;
 pending-manual live plugin install + README quickstart walkthrough; Copilot CLI global
 instructions support verify-on-install (docs/adapters.md caveat).
+
+## M8 — Enhancement: protected memories + variable expiry — 2026-07-18
+
+User feature request, brainstormed and approved before build (AD-14, AD-15):
+protect auto-pins (`--keep-expiry` opts out); protected = review-queue-only on
+expiry, never auto-archived.
+
+| Scope | Result |
+|-------|--------|
+| `protected: true` field; `protect`/`unprotect` commands; edit/delete/sweep/`doctor --fix`/purge all refuse or skip protected | DONE, tested |
+| Past-due protected: still served by recall, held in review queue until user acts | DONE, tested |
+| `[protected]` in list; `(type, protected)` label in packets | DONE, tested |
+| Durations `N[dwmy]` in `expire --in`, `purge --older-than`, `ttl_defaults` (m=30d, y=365d approximations) | DONE, tested |
+| Docs: ARCHITECTURE §4.2/§6.2/§6.6, rules 19–20, AD-14/AD-15, glossary; user-guide; troubleshooting; README; remember/recall skills; curator agent; hook conventions; adapter block | DONE |
+
+Notes:
+- Protection is CLI friction, not enforcement — OS permissions rejected (breaks P1,
+  not cross-platform, agents run as the user anyway). Honest boundary documented.
+- Adapter block text changed → next `adapt` run updates installed blocks in place
+  (by design, marker-delimited).
+- Tests: 94 passing total. Windows: **pending-windows**.

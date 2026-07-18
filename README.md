@@ -26,7 +26,8 @@ Every agent session starts as a stranger. Project files (`CLAUDE.md`, `AGENTS.md
 - **Remembers the journey.** Compact per-session journal entries plus monthly rollups — narrative continuity without transcript bloat.
 - **Token-frugal.** Recall is index-first and budget-capped (default ~1500 tokens). Your context window is never taxed by memory noise.
 - **Safe under concurrency.** Hash-checked compare-and-swap writes, atomic renames, conflicts preserved — two agents can't silently destroy each other's writes.
-- **Expiry with consent.** Memories carry expiry dates; you pin, extend, or delete. Nothing is hard-deleted without confirmation.
+- **Expiry with consent.** Memories carry expiry dates (`--in 30d/6w/18m/4y` or explicit dates); you pin, extend, or delete. Nothing is hard-deleted without confirmation.
+- **Protected memories.** Innate facts (name, hobbies, durable preferences) can be locked readonly for agents: `engram protect <name>` — no agent edit/delete, no automated lifecycle action, ever.
 - **No secrets, no network.** Writes are scanned against credential patterns and refused. The tooling never touches the network.
 
 ## Install
