@@ -1,17 +1,8 @@
-# Engram
-
-```
-      .    *    .
-   *   \   |   /   *
-     .  \  |  /  .
-   ------ (@) ------
-     '  /  |  \  '
-   *   /   |   \   *
-      '    *    '
-
-   E  N  G  R  A  M
-   memory that stays
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/banner-light.svg">
+  <img alt="Engram" src="assets/banner-dark.svg">
+</picture>
 
 **Engram** gives your AI coding agents one shared, persistent, user-level memory. Claude Code, Codex, GitHub Copilot, opencode — they all read and write the same store, so your agents remember who you are, what you're working toward, and what they've learned from working with you. Switch agents tomorrow and nothing needs migrating: the memory was shared all along.
 
